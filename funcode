@@ -1,0 +1,147 @@
+"""
+Test script to verify ONNX model scoring works with PySpark.
+This creates a dummy LightGBM model, converts it to ONNX, and scores using PySpark.
+
+Requirements:
+    pip install lightgbm onnx onnxmltools onnxruntime scikit-learn --break-system-packages
+"""
+
+import pandas as pd
+import numpy as np
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import pandas_udf, PandasUDFType, struct, col
+from pyspark.sql.types import StructType, StructField, DoubleType, ArrayType
+import lightgbm as lgb
+import onnxruntime as rt
+from skl2onnx.common.data_types import FloatTensorType
+from onnxmltools.convert import convert_lightgbm
+import io
+
+print("=" * 60)
+print("ONNX + PySpark Compatibility Test")
+print("=" * 60)
+
+# Step 1: Create and train a dummy LightGBM model
+print("\n[1/5] Training dummy LightGBM model...")
+np.random.seed(42)
+n_samples = 1000
+n_features = 5
+
+X_train = np.random.randn(n_samples, n_features)
+y_train = (X_train[:, 0] + X_train[:, 1] * 2 + np.random.randn(n_samples) * 0.1 > 0).astype(int)
+
+train_data = lgb.Dataset(X_train, label=y_train)
+params = {
+    'objective': 'binary',
+    'metric': 'binary_logloss',
+    'num_leaves': 31,
+    'learning_rate': 0.05,
+    'verbose': -1
+}
+
+lgb_model = lgb.train(params, train_data, num_boost_round=10)
+print("✓ LightGBM model trained")
+
+# Step 2: Convert to ONNX
+print("\n[2/5] Converting LightGBM model to ONNX...")
+initial_type = [('input', FloatTensorType([None, n_features]))]
+onnx_model = convert_lightgbm(lgb_model, initial_types=initial_type, target_opset=12)
+
+# Save ONNX model to bytes (for broadcasting)
+onnx_bytes = onnx_model.SerializeToString()
+print(f"✓ Model converted to ONNX ({len(onnx_bytes)} bytes)")
+
+# Step 3: Create PySpark session
+print("\n[3/5] Initializing PySpark session...")
+spark = SparkSession.builder \
+    .appName("ONNX_Test") \
+    .master("local[2]") \
+    .config("spark.driver.memory", "2g") \
+    .getOrCreate()
+
+print(f"✓ Spark session created (version {spark.version})")
+
+# Step 4: Create test data in Spark
+print("\n[4/5] Creating test data in Spark DataFrame...")
+X_test = np.random.randn(100, n_features)
+test_df = pd.DataFrame(X_test, columns=[f'feature_{i}' for i in range(n_features)])
+spark_df = spark.createDataFrame(test_df)
+print(f"✓ Created Spark DataFrame with {spark_df.count()} rows and {len(spark_df.columns)} columns")
+
+# Step 5: Define pandas UDF for ONNX scoring
+print("\n[5/5] Testing ONNX scoring with pandas UDF...")
+
+# Broadcast the ONNX model bytes to all workers
+broadcasted_model = spark.sparkContext.broadcast(onnx_bytes)
+
+# Define the pandas UDF
+@pandas_udf(DoubleType())
+def predict_onnx(*cols):
+    """
+    Pandas UDF that loads ONNX model and scores a batch of rows.
+    """
+    # Load ONNX model from broadcasted bytes
+    model_bytes = broadcasted_model.value
+    sess = rt.InferenceSession(model_bytes)
+    
+    # Prepare input features
+    input_array = pd.concat(cols, axis=1).values.astype(np.float32)
+    
+    # Get predictions (probability of class 1)
+    input_name = sess.get_inputs()[0].name
+    label_name = sess.get_outputs()[1].name  # probabilities
+    
+    pred_proba = sess.run([label_name], {input_name: input_array})[0]
+    
+    # Return probability of positive class
+    return pd.Series(pred_proba[:, 1])
+
+# Apply the UDF
+feature_cols = [col(f'feature_{i}') for i in range(n_features)]
+result_df = spark_df.withColumn('prediction', predict_onnx(*feature_cols))
+
+# Collect and display results
+print("\n" + "=" * 60)
+print("RESULTS")
+print("=" * 60)
+result_pd = result_df.limit(10).toPandas()
+print("\nFirst 10 predictions:")
+print(result_pd)
+
+print("\nPrediction statistics:")
+predictions = result_df.select('prediction').toPandas()['prediction']
+print(f"  Mean: {predictions.mean():.4f}")
+print(f"  Min:  {predictions.min():.4f}")
+print(f"  Max:  {predictions.max():.4f}")
+print(f"  Std:  {predictions.std():.4f}")
+
+# Verify predictions are valid probabilities
+if (predictions >= 0).all() and (predictions <= 1).all():
+    print("\n✓ All predictions are valid probabilities [0, 1]")
+else:
+    print("\n✗ Warning: Some predictions are outside [0, 1]")
+
+print("\n" + "=" * 60)
+print("✓ TEST PASSED - ONNX works with PySpark!")
+print("=" * 60)
+
+# Performance test (optional)
+print("\n[OPTIONAL] Performance test on larger dataset...")
+large_test_df = pd.DataFrame(
+    np.random.randn(10000, n_features), 
+    columns=[f'feature_{i}' for i in range(n_features)]
+)
+large_spark_df = spark.createDataFrame(large_test_df)
+
+import time
+start_time = time.time()
+large_result = large_spark_df.withColumn('prediction', predict_onnx(*feature_cols))
+_ = large_result.count()  # Trigger execution
+elapsed = time.time() - start_time
+
+print(f"✓ Scored 10,000 rows in {elapsed:.2f} seconds ({10000/elapsed:.0f} rows/sec)")
+
+# Cleanup
+spark.stop()
+print("\n✓ Spark session stopped")
+print("\nYou can now use this pattern for your production LightGBM model!")
