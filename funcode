@@ -3,7 +3,7 @@ Test script to verify ONNX model scoring works with PySpark.
 This creates a dummy LightGBM model, converts it to ONNX, and scores using PySpark.
 
 Requirements:
-    pip install lightgbm onnx onnxmltools onnxruntime scikit-learn --break-system-packages
+    pip install lightgbm onnx onnxmltools onnxruntime --break-system-packages
 """
 
 import pandas as pd
@@ -13,7 +13,7 @@ from pyspark.sql.functions import pandas_udf, PandasUDFType, struct, col
 from pyspark.sql.types import StructType, StructField, DoubleType, ArrayType
 import lightgbm as lgb
 import onnxruntime as rt
-from skl2onnx.common.data_types import FloatTensorType
+from onnxmltools.convert.common.data_types import FloatTensorType
 from onnxmltools.convert import convert_lightgbm
 import io
 
