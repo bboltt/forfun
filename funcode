@@ -4,205 +4,216 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import re
 from pyspark.sql import functions as F
-from pyspark.sql.types import IntegerType, DoubleType
 
-# Import your existing custom modules
+# --- Your Custom Imports ---
 from optimal_spark_config.create_spark_instance import generate_spark_instance
 # from fraud_origination.shared_utils.pipeline.data import write_df_to_hive 
-# (Assuming write_df is not needed for EDA, just reading)
 
 # ================= CONFIGURATION =================
-# Set to True to run on the full Data Lake table. 
-# Set to False to run on the local CSV sample.
+# Toggle this to switch between Big Data mode and Local Dev mode
 RUN_ON_FULL_DATA = True 
 
-# Configuration paths
+# Paths & Tables
 HIVE_TABLE = 'dm_fraud_detection.cs_training_data_v2'
-LOCAL_DATA_FILE = 'eda_dataframe_1.csv'
+LOCAL_FILENAME = 'eda_dataframe_1.csv'
 DATA_FOLDER = 'development_work/customer_score_v2/eda_data/'
 SAVE_FOLDER = 'development_work/customer_score_v2/misc_figures/'
 
-# Columns Config
-DATE_COL = 'applicationdate'
-FRAUD_LABEL = 'fraud_label_180'
-BOOKED_FLAG = 'booked'
+# Column Constants
+DATE_COL = 'applicationdate' # Schema shows this is String, needs conversion
+FRAUD_COL = 'fraud_label_180'
+BOOKED_COL = 'booked'
 
-def get_spark_session():
-    return generate_spark_instance(
-        total_memory=100,
-        total_vcpu=50,
-        python37=True,
-        appName='originations_customer_score_eda_full'
-    )
+def download_sample_if_needed(spark):
+    """Downloads a small CSV sample if it doesn't exist locally."""
+    full_path = os.path.join(DATA_FOLDER, LOCAL_FILENAME)
+    if not os.path.exists(full_path):
+        print(f"Local file not found. Sampling 1% from {HIVE_TABLE}...")
+        os.makedirs(DATA_FOLDER, exist_ok=True)
+        
+        # Sample from Hive and save to CSV
+        spark.table(HIVE_TABLE).sample(0.01).toPandas().to_csv(full_path, index=False)
+        print(f"Sample saved to {full_path}")
+    return full_path
 
-def prepare_data(spark):
+def get_dataframe(spark):
     """
-    Loads data based on the RUN_ON_FULL_DATA flag.
-    Returns a Spark DataFrame (even if loaded from CSV, for consistency).
+    Returns a Spark DataFrame regardless of mode.
+    - Full Mode: Reads Hive Table.
+    - Local Mode: Reads CSV into Spark (to keep downstream logic consistent).
     """
     if RUN_ON_FULL_DATA:
-        print(f"--- Loading Full Data from Hive: {HIVE_TABLE} ---")
+        print(f"--- MODE: FULL DATA (Hive: {HIVE_TABLE}) ---")
         df = spark.table(HIVE_TABLE)
-        
-        # Optimization: Filter columns early if you don't need all 200+ columns
-        # df = df.select(DATE_COL, FRAUD_LABEL, BOOKED_FLAG, 'max_open_age', 'total_accts', ...)
-        
     else:
-        print(f"--- Loading Local Sample Data: {LOCAL_DATA_FILE} ---")
-        # If local file exists, load it using Pandas then convert to Spark for consistent API
-        # Or simply use Spark to read the CSV directly
-        full_path = os.path.join(DATA_FOLDER, LOCAL_DATA_FILE)
-        if not os.path.exists(full_path):
-            print("Local file not found. Triggering download from Hive first...")
-            download_sample(spark)
-        
-        df = spark.read.option("header", "true").option("inferSchema", "true").csv(full_path)
+        print(f"--- MODE: LOCAL SAMPLE ({LOCAL_FILENAME}) ---")
+        csv_path = download_sample_if_needed(spark)
+        # Read CSV back into Spark to use the same PySpark aggregation logic
+        df = spark.read.option("header", "true").option("inferSchema", "true").csv(csv_path)
 
-    # Ensure Date column is actually a DateType (Schema shows it as String)
+    # --- PREPROCESSING ---
+    # 1. Convert String Date to DateType (critical for monthly stats)
     df = df.withColumn(DATE_COL, F.to_date(F.col(DATE_COL)))
     
-    # Fill NA for target if necessary (based on your original script)
-    df = df.fillna({FRAUD_LABEL: 0})
+    # 2. Fill NAs for Fraud Label (0 if null)
+    df = df.fillna({FRAUD_COL: 0})
     
     return df
 
-def download_sample(spark):
-    """Helper to download a small sample if working locally."""
-    print("Sampling 1% of data for local development...")
-    tbl = spark.table(HIVE_TABLE)
-    pdf = tbl.sample(0.01).toPandas()
-    
-    os.makedirs(DATA_FOLDER, exist_ok=True)
-    pdf.to_csv(os.path.join(DATA_FOLDER, LOCAL_DATA_FILE), index=False)
-    print("Download complete.")
-
-def calculate_high_level_stats(df):
+def plot_monthly_stats(df):
     """
-    Calculates Monthly Counts, Booked Rates, and Fraud Rates on the FULL dataset using Spark.
+    Calculates High-Level Stats on the Cluster (Spark) then plots in Driver (Pandas).
+    Metrics: Volume, Booked Rate, Fraud Rate.
     """
-    print("--- Calculating High Level Monthly Stats ---")
+    print("--- Calculating Monthly Statistics ---")
     
-    # 1. Truncate date to Month start
-    df_monthly = df.withColumn('month_year', F.trunc(F.col(DATE_COL), 'Month'))
+    # 1. Create Month Column
+    df_monthly = df.withColumn('month_start', F.trunc(F.col(DATE_COL), 'Month'))
     
-    # 2. Aggregate in Spark (Distributed Calculation)
-    stats_df = df_monthly.groupBy('month_year').agg(
+    # 2. Aggregation (Heavy lifting done by Spark)
+    stats_spark = df_monthly.groupBy('month_start').agg(
         F.count('*').alias('total_apps'),
-        F.sum(BOOKED_FLAG).alias('total_booked'),
-        F.sum(FRAUD_LABEL).alias('total_fraud')
+        F.sum(BOOKED_COL).alias('total_booked'),
+        F.sum(FRAUD_COL).alias('total_fraud')
     )
     
     # 3. Calculate Rates
-    stats_df = stats_df.withColumn('booked_rate', F.col('total_booked') / F.col('total_apps'))
-    stats_df = stats_df.withColumn('fraud_rate', F.col('total_fraud') / F.col('total_apps')) # or total_booked depending on business logic
+    stats_spark = stats_spark.withColumn('booked_rate', F.col('total_booked') / F.col('total_apps'))
+    stats_spark = stats_spark.withColumn('fraud_rate', F.col('total_fraud') / F.col('total_apps'))
     
-    # 4. Sort and Collect to Pandas (This data is now small enough: 1 row per month)
-    stats_pdf = stats_df.orderBy('month_year').toPandas()
+    # 4. Collect small result to Pandas
+    pdf = stats_spark.orderBy('month_start').toPandas()
     
-    # 5. Plotting
     os.makedirs(SAVE_FOLDER, exist_ok=True)
-    
+
     # Plot 1: Volume
     plt.figure(figsize=(12, 6))
-    sns.barplot(data=stats_pdf, x='month_year', y='total_apps', color='skyblue', label='Total Apps')
-    sns.barplot(data=stats_pdf, x='month_year', y='total_booked', color='navy', label='Booked Apps')
+    sns.barplot(data=pdf, x='month_start', y='total_apps', color='lightgray', label='Total Apps')
+    sns.barplot(data=pdf, x='month_start', y='total_booked', color='blue', label='Booked Apps')
     plt.xticks(rotation=45)
-    plt.title("Monthly Volume: Applications vs Booked")
+    plt.title("Monthly Volume")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(f'{SAVE_FOLDER}monthly_volume.jpg')
+    plt.savefig(SAVE_FOLDER + 'monthly_volume.jpg')
     plt.clf()
-    
-    # Plot 2: Rates
+
+    # Plot 2: Rates (Dual Axis)
     fig, ax1 = plt.subplots(figsize=(12, 6))
     
-    sns.lineplot(data=stats_pdf, x='month_year', y='booked_rate', ax=ax1, color='blue', label='Booked Rate', marker='o')
+    sns.lineplot(data=pdf, x='month_start', y='booked_rate', ax=ax1, color='blue', marker='o', label='Booked Rate')
     ax1.set_ylabel('Booked Rate', color='blue')
+    ax1.set_ylim(0, None) # optional: start at 0
     
     ax2 = ax1.twinx()
-    sns.lineplot(data=stats_pdf, x='month_year', y='fraud_rate', ax=ax2, color='red', label='Fraud Rate', marker='o')
+    sns.lineplot(data=pdf, x='month_start', y='fraud_rate', ax=ax2, color='red', marker='o', label='Fraud Rate')
     ax2.set_ylabel('Fraud Rate', color='red')
-    
-    plt.title("Monthly Booked Rate vs Fraud Rate")
-    plt.tight_layout()
-    plt.savefig(f'{SAVE_FOLDER}monthly_rates.jpg')
-    plt.clf()
-    
-    print("High level stats calculated and plotted.")
+    ax2.set_ylim(0, None)
 
-def analyze_distributions(df):
+    plt.title("Monthly Trends: Booked Rate vs Fraud Rate")
+    plt.tight_layout()
+    plt.savefig(SAVE_FOLDER + 'monthly_rates.jpg')
+    plt.clf()
+    print("Monthly stats saved.")
+
+def plot_distributions(df):
     """
-    Performs the distribution analysis.
-    NOTE: For distribution plots (hist/scatter), we usually cannot plot the WHOLE dataset.
-    We take a heavy sample (e.g., 10-20% or fixed count) for visualization.
+    Downsamples data for Scatter/Hist plots (Pandas/Seaborn cannot handle 100M rows).
     """
     print("--- Generating Distribution Plots ---")
     
-    # If on full data, sample it down for plotting (e.g., 500k rows max)
-    # If on local data, we already have the sample.
+    # 1. Sample for Visualization
+    # If Full Data, take 10% (or less depending on memory). If Local, take all.
     if RUN_ON_FULL_DATA:
-        # Adjust fraction as needed to fit your driver memory
-        plot_df = df.sample(fraction=0.1).toPandas()
+        print("Sampling 10% of full data for distribution plots...")
+        pdf = df.sample(fraction=0.1).toPandas()
     else:
-        plot_df = df.toPandas()
-        
-    # Feature Engineering on Pandas DF (reusing your logic)
-    plot_df['relat_age_bin'] = pd.cut(
-        plot_df['max_open_age'],
+        pdf = df.toPandas()
+
+    # 2. Feature Engineering (Pandas side)
+    pdf['relat_age_bin'] = pd.cut(
+        pdf['max_open_age'],
         bins=[0, 0.5, 1, 2, 999],
         labels=['new_custs_<6mo', 'newish_6mo_1y', 'somewhat_new_1y_2y', 'established_>2y']
     )
+
+    # 3. Plotting (Existing Logic)
     
-    # --- Plot: Fraud by Relationship Age ---
-    sns.barplot(data=plot_df, x='relat_age_bin', y=FRAUD_LABEL, errorbar=("ci", 95))
-    plt.savefig(f'{SAVE_FOLDER}fraud_dist_by_relationship_length.jpg')
-    plt.clf()
-    
-    # --- Plot: Total Accts vs Max Open Age ---
-    sns.scatterplot(data=plot_df, x='max_open_age', y='total_accts', size=0.5, alpha=0.3, hue=FRAUD_LABEL)
-    plt.savefig(f'{SAVE_FOLDER}total_accts_vs_relationship.jpg')
+    # Barplot: Fraud by Relationship Age
+    sns.barplot(data=pdf, x='relat_age_bin', y=FRAUD_COL, errorbar=("ci", 95))
+    plt.savefig(SAVE_FOLDER + 'fraud_dist_by_relationship_length.jpg')
     plt.clf()
 
-    # --- Loop for App Windows (30d, 90d, etc) ---
-    app_cols = [c for c in plot_df.columns if c.startswith("total_apps_in_last_")]
-    windows = sorted(list(set([int(re.search(r'(\d+)', c).group(1)) for c in app_cols if re.search(r'(\d+)', c)])))
+    # Scatter: Total Accts vs Max Open Age
+    # Note: Scatter plots are very heavy. If PDF is still >100k rows, consider sampling specifically for this plot.
+    scatter_subset = pdf.sample(n=min(50000, len(pdf))) 
+    sns.scatterplot(data=scatter_subset, x='max_open_age', y='total_accts', size=0.5, alpha=0.3, hue=FRAUD_COL)
+    plt.savefig(SAVE_FOLDER + 'total_accts_vs_relationship.jpg')
+    plt.clf()
+
+    # JointPlot
+    sns.jointplot(data=scatter_subset, x='max_open_age', y=FRAUD_COL)
+    plt.savefig(SAVE_FOLDER + 'fraud_vs_relationship_length.jpg')
+    plt.clf()
+
+    # Histograms for App Windows
+    app_cols = [c for c in pdf.columns if c.startswith("total_apps_in_last_")]
+    booked_cols = [c for c in pdf.columns if c.startswith("total_booked_apps_in_last_")]
     
+    # Extract window days (e.g., 30, 90)
+    windows = sorted(list(set([int(re.search(r'(\d+)', c).group(1)) for c in app_cols if re.search(r'(\d+)', c)])))
+
     if windows:
         fig, ax = plt.subplots(nrows=len(windows), ncols=1, figsize=(8, 3 * len(windows)))
-        # Ensure ax is iterable if only 1 window
-        if len(windows) == 1: ax = [ax]
+        if len(windows) == 1: ax = [ax] # Handle single window case
 
         for i, w in enumerate(windows):
-            app_col = f"total_apps_in_last_{w}days"
-            booked_col = f"total_booked_apps_in_last_{w}days"
+            app_col = f"total_apps_in_last_{w}_days" # Check your column naming convention carefully (underscores)
+            booked_col = f"total_booked_apps_in_last_{w}_days"
             
-            # Filter logic (must exist in columns)
-            if app_col in plot_df.columns:
-                subset = plot_df[plot_df[app_col] > 0]
+            # Normalize column name check (sometimes it is '30days' vs '30_days')
+            # Based on your screenshot, it looks like `total_apps_in_last_{w}_days` might be `total_apps_in_last_{w}days`
+            # Adjusting based on regex match logic:
+            possible_app = [c for c in pdf.columns if f"last_{w}" in c and "booked" not in c]
+            possible_booked = [c for c in pdf.columns if f"last_{w}" in c and "booked" in c]
+            
+            if possible_app:
+                actual_app_col = possible_app[0]
+                subset = pdf[pdf[actual_app_col] > 0]
                 
-                sns.histplot(data=subset, x=app_col, bins=range(0, 30), alpha=0.5, ax=ax[i], color="blue", label="All Apps")
-                if booked_col in plot_df.columns:
-                    sns.histplot(data=subset, x=booked_col, bins=range(0, 30), alpha=0.4, ax=ax[i], color="orange", label="Booked Apps")
+                sns.histplot(data=subset, x=actual_app_col, bins=range(0, 30), alpha=0.5, ax=ax[i], color="blue", label="All Apps")
                 
+                if possible_booked:
+                    actual_booked_col = possible_booked[0]
+                    sns.histplot(data=subset, x=actual_booked_col, bins=range(0, 30), alpha=0.4, ax=ax[i], color="orange", label="Booked Apps")
+
                 ax[i].set_title(f"{w}-day window")
                 ax[i].legend()
-        
+
         plt.tight_layout()
-        plt.savefig(f'{SAVE_FOLDER}apps_per_social.jpg')
+        plt.savefig(SAVE_FOLDER + 'apps_per_social.jpg')
         plt.clf()
+    
+    print("Distribution plots saved.")
+
+def analyze():
+    # Initialize Spark using your custom generator
+    spark = generate_spark_instance(
+        total_memory=100,
+        total_vcpu=50,
+        python37=True,
+        appName='originations_customer_score_eda'
+    )
+
+    # 1. Get Data (Full or Sample)
+    df = get_dataframe(spark)
+    
+    # 2. Run Aggregate Stats (Counts, Fraud Rates, Booked Rates)
+    plot_monthly_stats(df)
+    
+    # 3. Run Distribution Plots (Scatter/Hist)
+    plot_distributions(df)
+    
+    print("EDA Complete.")
 
 if __name__ == "__main__":
-    spark = get_spark_session()
-    
-    # 1. Load Data (Full or Sample)
-    main_df = prepare_data(spark)
-    
-    # 2. Calculate High Level Stats (Counts, Booked Rate, Fraud Rate)
-    # This runs on the Cluster
-    calculate_high_level_stats(main_df)
-    
-    # 3. Detailed Distribution Plots
-    # This brings a sample to the Driver
-    analyze_distributions(main_df)
-    
-    print("Analysis Complete.")
+    analyze()
