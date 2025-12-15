@@ -1,8 +1,15 @@
 Commercial Deposit Features
-deposit_comm_bal_change_rate_norm_abs_30d & deposit_comm_coeff_var_90d (Missing Rate: ~91%)
+deposit_comm_coeff_var_90d, deposit_comm_kurtosis_90d, deposit_comm_skewness_90d, deposit_comm_max_min_ratio_90d (Missing Rate: ~91%)
 
-Justification: These features are missing for approximately 91% of the population, which correctly identifies the vast majority of customers who do not hold a commercial/business deposit account. We retained specific time windows (e.g., 90-day coefficient of variation) to capture the financial stability and volatility of the small but high-risk/high-value segment of business owners. As noted in the correlation analysis, while different time windows (7d, 30d, 90d) showed similarity, we selected these specific versions to maintain a uniform approach for commercial accounts without over-populating the model with redundant timelines for a sparse sub-population.
+Justification: These higher-order statistical features (Coefficient of Variation, Kurtosis, Skewness, Max/Min Ratio) are missing for the 91% of customers who do not hold a commercial deposit account. For the business-holding segment, we adopted a uniform 90-day window strategy. As noted in the correlation analysis, while consumer accounts supported multiple time windows (7d, 30d, 180d), the commercial data is sparser. We therefore retained the 90-day versions of these distribution metrics as the single, robust standard for capturing the shape and volatility of business cash flows, avoiding the noise of shorter windows while preserving the signal for irregular or "spiky" transaction behavior often associated with commercial fraud.
 
+deposit_comm_bal_change_rate_norm_abs_30d & deposit_comm_bal_change_rate_norm_abs_90d (Missing Rate: ~91%)
+
+Justification: These features measure the magnitude of balance changes (velocity) over monthly and quarterly horizons. They are retained to capture significant capital movements in business accounts. Unlike the statistical distribution features where a single window sufficed, keeping both the 30-day and 90-day change rates allows the model to distinguish between a recent, sudden ramp-up in activity (30d) versus a sustained trend of balance shifting (90d), which helps differentiate between legitimate business growth and potential bust-out accumulation.
+
+account_days_deposit_comm_negative_7d & account_days_deposit_comm_negative_90d (Missing Rate: ~91%)
+
+Justification: These are critical financial distress indicators. A missing value is a neutral "safe" signal (no commercial account), while a populated value indicates the number of days a business was in overdraft. We retained both the 7-day and 90-day versions because they signal different risk profiles: the 7-day feature detects immediate, acute liquidity crises (often a precursor to immediate default), while the 90-day feature identifies chronic insolvency or long-term reliance on overdrafts. Both signals are highly predictive of credit failure and fraud intent.
 Credit Card Usage & History Features
 cc_days_since_last_pd & cc_bal_current_max (Missing Rate: ~90%)
 
