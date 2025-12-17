@@ -1,34 +1,40 @@
-Commercial Deposit Features
-deposit_comm_coeff_var_90d, deposit_comm_kurtosis_90d, deposit_comm_skewness_90d, deposit_comm_max_min_ratio_90d (Missing Rate: ~91%)
+1. Credit Card History & Usage
+cc_days_since_last_pd (90%): Missing for customers who have never had a past-due event or hold no credit card. With an IV of 0.055, this feature is retained because, for the card-holding population, recent delinquency is a direct measure of financial distress and a top-tier fraud precursor.
 
-Justification: These higher-order statistical features (Coefficient of Variation, Kurtosis, Skewness, Max/Min Ratio) are missing for the 91% of customers who do not hold a commercial deposit account. For the business-holding segment, we adopted a uniform 90-day window strategy. As noted in the correlation analysis, while consumer accounts supported multiple time windows (7d, 30d, 180d), the commercial data is sparser. We therefore retained the 90-day versions of these distribution metrics as the single, robust standard for capturing the shape and volatility of business cash flows, avoiding the noise of shorter windows while preserving the signal for irregular or "spiky" transaction behavior often associated with commercial fraud.
+cc_days_since_last_payment (83%): Missing for customers with no payment history found. Retained with an IV of 0.051 because an active card with no recent payments is a strong indicator of "run-up" behavior or potential bust-out activity.
 
-deposit_comm_bal_change_rate_norm_abs_30d & deposit_comm_bal_change_rate_norm_abs_90d (Missing Rate: ~91%)
+cc_days_since_last_nsf (82%): Missing for customers who have never triggered an NSF event. Despite the high missing rate, the IV of 0.053 supports retaining this as a high-precision "Risk Flag," where the presence of a value indicates reckless account usage.
 
-Justification: These features measure the magnitude of balance changes (velocity) over monthly and quarterly horizons. They are retained to capture significant capital movements in business accounts. Unlike the statistical distribution features where a single window sufficed, keeping both the 30-day and 90-day change rates allows the model to distinguish between a recent, sudden ramp-up in activity (30d) versus a sustained trend of balance shifting (90d), which helps differentiate between legitimate business growth and potential bust-out accumulation.
+cc_overlimit_flag (82%): Missing for customers who have never exceeded their credit limit. Retained with an IV of 0.058 as a binary trigger for financial distress; customers hitting limits often exhibit behaviors highly correlated with default.
 
-account_days_deposit_comm_negative_7d & account_days_deposit_comm_negative_90d (Missing Rate: ~91%)
+2. Cross-Product Latency & Spread Features
+rcif_days_dep_to_cred (82%) & rcif_days_dep_to_loan (88%): Missing for customers who do not hold both deposit and lending products. Retained with IVs of ~0.10 because they measure the "Speed of Cross-Sell." A gap of ~0 days (concurrent opening) is a classic bust-out signal, while a long gap indicates organic growth.
 
-Justification: These are critical financial distress indicators. A missing value is a neutral "safe" signal (no commercial account), while a populated value indicates the number of days a business was in overdraft. We retained both the 7-day and 90-day versions because they signal different risk profiles: the 7-day feature detects immediate, acute liquidity crises (often a precursor to immediate default), while the 90-day feature identifies chronic insolvency or long-term reliance on overdrafts. Both signals are highly predictive of credit failure and fraud intent.
-Credit Card Usage & History Features
-cc_days_since_last_pd & cc_bal_current_max (Missing Rate: ~90%)
+cons_lending_avg_open_age_vs_all (89%): Missing for non-borrowers. With an IV of 0.109, this is retained to isolate personal loan borrowers and score the specific risk of "New Borrower" behavior relative to their total relationship tenure.
 
-Justification: These features are structurally missing for customers without a consumer credit card. However, for the ~10% of customers who do hold a credit card, these metrics provide some of the strongest signals for financial distress and bust-out fraud. cc_days_since_last_pd (Days Since Past Due) acts as a critical delinquency indicator, while cc_bal_current_max captures utilization spikes. Retaining them allows the model to score "Credit Active" customers with high precision, while treating the missing population as a neutral baseline.
+cons_cc_avg_open_age_vs_all (82%): Missing for non-cardholders. Retained with a strong IV of 0.127 to effectively score "New Credit on Old Profile" scenarios (potential Account Takeover) versus standard new customers.
 
-cons_cc_max_open_age (Missing Rate: ~82%)
+cons_savings_avg_open_age_vs_all (57%): Missing for customers without savings accounts. With an IV of 0.102, this is retained to measure cross-sell maturity, distinguishing between long-term customers adding savings (low risk) and new entities (higher risk).
 
-Justification: Similar to the checking and savings age features, this metric isolates the credit card holder population. It was retained to measure the "depth" of the credit relationship. A missing value indicates no credit card relationship, whereas a low value for an existing cardholder indicates a "fresh" account, which carries a different risk profile compared to a long-standing line of credit.
+3. Application Velocity & PII
+cc_apps_in_last_180_days & _90_days (80%): Missing when no credit card applications are found in the window. Retained with an IV of 0.106 to capture "Application Storms"—bursts of applications that are characteristic of synthetic identity attacks.
 
-Application PII & Velocity Features
-apps_num_addrs, apps_num_emails, apps_num_dobs (Missing Rate: ~46%)
+rdo_apps_in_last_180_days & _90_days (80%): Missing when no retail deposit applications are found. Retained (IV ~0.106) as a standard velocity counter to detect sudden spikes in account opening attempts.
 
-Justification: These features are missing for customers who have not submitted an application within the 3-year lookback window. This missingness effectively segments the population into "Passive Customers" (no recent apps) vs. "Active Applicants." For the active group, these features are critical stability indicators—a high count of unique addresses or emails associated with a single SSN is a classic synthetic identity or account takeover signal. We retain them to ensure the model can detect PII instability among active applicants.
+apps_num_addrs, emails, dobs, ids, phones (46%): Missing for passive customers with no applications in the last 3 years. These are critical for active applicants, with strong IVs ranging from 0.20 to 0.28, proving that PII instability (e.g., one SSN using multiple names/addresses) is a major fraud predictor.
 
-cc_apps_in_last_180_days & rdo_apps_in_last_180_days (Missing Rate: ~80%)
+days_since_last_application (46%): Missing for passive customers. Retained with an IV of 0.160 to measure recency of demand and distinguish active credit seekers from the passive customer base.
 
-Justification: These are pure velocity features. The high missing rate simply reflects that 80% of customers have not applied for a Credit Card (CC) or Retail Deposit (RDO) online in the last 6 months. This is a valid "safe" signal. The presence of a value (even a low one) indicates recent demand for credit or new accounts. These are retained as standard velocity checks to detect rapid application bursts.
+4. Account Churn & Retention
+cons_savings_avg_closed_age (83%): Missing for customers who have never closed a savings account. Retained because the very high IV of 0.350 confirms that for the churned sub-population, the age at closure is a massive predictor of risk.
 
-Consumer Lending Features
-cons_lending_avg_open_age_vs_all (Missing Rate: ~89%)
+cons_checking_avg_closed_age (75%): Missing for customers who have never closed a checking account. Retained with an IV of 0.260 to capture checking-specific attrition, which carries a distinct risk signal from savings churn.
 
-Justification: This feature captures the relative maturity of a customer's personal loans compared to their other relationships. The ~89% missing rate identifies non-borrowers. It is retained because, for borrowers, a discrepancy between loan age and general relationship age (e.g., a brand new loan for a long-time customer vs. a brand new loan for a brand new customer) offers a nuanced view of "new account" risk that aggregate age features miss.
+avg_closed_age (55%) & max_closed_age (55%): Missing for "Loyal" customers who have never closed an account. Retained with IVs of 0.260 and 0.200 respectively, as they identify customers with deep historical ties who have recently severed relationships.
+
+rcif_days_since_any_close (55%): Missing for customers with no closed accounts. Retained (IV 0.090) to track the recency of churn, providing a dynamic behavioral signal that static "Age" features miss.
+
+5. Savings Account Profile
+cons_savings_max_open_age (57%): Missing for customers with no open savings account. Retained with an IV of 0.141 as it captures the depth of the savings relationship for that specific segment.
+
+cons_savings_min_acct_age (45%): Missing for customers who never had a savings account. Retained because its extremely high IV of 0.333 confirms it is critical for scrutinizing the "freshness" of the newest savings account, a common vector for new account fraud.
